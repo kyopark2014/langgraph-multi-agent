@@ -207,7 +207,6 @@ def search_by_tavily(keyword: str) -> str:
     keyword: search keyword
     return: the information of keyword
     """    
-    global reference_docs    
     answer = ""
     
     keyword = keyword.replace('\'','')
@@ -220,9 +219,6 @@ def search_by_tavily(keyword: str) -> str:
         url = doc.metadata['url']
         answer += f"{content}, URL: {url}\n" 
 
-    if len(relevant_documents):
-        reference_docs += relevant_documents
-    
     if answer == "":
         # answer = "No relevant documents found." 
         answer = "관련된 정보를 찾지 못하였습니다."
@@ -651,8 +647,7 @@ def run_agent_executor(query, historyMode, st):
         )
 
     # initiate
-    global reference_docs, contentList, image_url
-    reference_docs = []
+    global contentList, image_url
     contentList = []
     image_url = []
 
@@ -685,14 +680,8 @@ def run_agent_executor(query, historyMode, st):
             logger.info(f"{i} --> {m.content}")
         logger.info(f"userId: {chat.userId}")
 
-    for i, doc in enumerate(reference_docs):
-        logger.info(f"--> {i}: {doc}")
         
-    reference = ""
-    if reference_docs:
-        reference = chat.get_references(reference_docs)
-
     msg = chat.extract_thinking_tag(msg, st)
     
-    return msg+reference, image_url, reference_docs
+    return msg, image_url
 

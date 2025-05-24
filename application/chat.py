@@ -309,7 +309,6 @@ def translate_text(text):
 
     return msg[msg.find('<result>')+8:len(msg)-9] # remove <result> tag
 
-reference_docs = []
 # api key to get weather information in agent
 secretsmanager = boto3.client(
     service_name='secretsmanager',

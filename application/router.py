@@ -327,15 +327,7 @@ def run_router_supervisor(query, st):
     logger.info(f"messages: {result['messages']}")
 
     msg = result['messages'][-1].content
+    logger.info(f"msg: {msg}")
                 
-    reference = ""
-    if reference_docs:
-        for i, doc in enumerate(reference_docs):
-            logger.info(f"--> {i}: {doc}")
-
-        reference = chat.get_references(reference_docs)
-
     # msg = chat.extract_thinking_tag(msg, st)
-    image_url = ""
-
-    return msg, image_url, reference
+    return msg

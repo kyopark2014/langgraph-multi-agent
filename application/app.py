@@ -96,13 +96,6 @@ def display_chat_messages() -> None:
 
 display_chat_messages()
 
-def show_references(reference_docs):
-    if debugMode == "Enable" and reference_docs:
-        with st.expander(f"답변에서 참조한 {len(reference_docs)}개의 문서입니다."):
-            for i, doc in enumerate(reference_docs):
-                st.markdown(f"**{doc.metadata['name']}**: {doc.page_content}")
-                st.markdown("---")
-
 # Greet user
 if not st.session_state.greetings:
     with st.chat_message("assistant"):
@@ -139,54 +132,41 @@ if prompt := st.chat_input("메시지를 입력하세요."):
 
         elif mode == "Multi-agent Supervisor (Router)":
             sessionState = ""
-            chat.references = []
-            chat.image_url = []
             with st.status("thinking...", expanded=True, state="running") as status:
-                response, image_url, reference_docs = router.run_router_supervisor(prompt, st)
+                response = router.run_router_supervisor(prompt, st)
                 st.write(response)
                 logger.info(f"response: {response}")
                 
                 st.session_state.messages.append({
                     "role": "assistant", 
-                    "content": response,
-                    "images": image_url if image_url else []
+                    "content": response
                 })
                 chat.save_chat_history(prompt, response)       
-
-                show_references(reference_docs)              
 
         elif mode == "LangGraph Supervisor":
             sessionState = ""
-            chat.references = []
-            chat.image_url = []
             with st.status("thinking...", expanded=True, state="running") as status:
-                response, image_url, reference_docs = supervisor.run_langgraph_supervisor(prompt, st)
+                response = supervisor.run_langgraph_supervisor(prompt, st)
                 st.write(response)
                 logger.info(f"response: {response}")
                 
                 st.session_state.messages.append({
                     "role": "assistant", 
-                    "content": response,
-                    "images": image_url if image_url else []
+                    "content": response
                 })
                 chat.save_chat_history(prompt, response)       
-
-                show_references(reference_docs)              
 
         elif mode == "LangGraph Swarm":
             sessionState = ""
             with st.status("thinking...", expanded=True, state="running") as status:
-                response, image_url, reference_docs = swarm.run_langgraph_swarm(prompt, st)
+                response = swarm.run_langgraph_swarm(prompt, st)
                 st.write(response)
                 logger.info(f"response: {response}")
                 
                 st.session_state.messages.append({
                     "role": "assistant", 
-                    "content": response,
-                    "images": image_url if image_url else []
+                    "content": response
                 })
                 chat.save_chat_history(prompt, response)       
-
-                show_references(reference_docs)              
 
         

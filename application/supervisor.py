@@ -176,9 +176,7 @@ def create_collaborator(tools, name, st):
     
     return buildChatAgent()
     
-reference_docs = []
 contentList = []
-image_url = []
 isInitiated=False
 
 def run_langgraph_supervisor(query, st):
@@ -271,13 +269,6 @@ def run_langgraph_supervisor(query, st):
             break    
     logger.info(f"msg: {msg}")
 
-    for i, doc in enumerate(reference_docs):
-        logger.info(f"--> {i}: {doc}")
-        
-    reference = ""
-    if reference_docs:
-        reference = chat.get_references(reference_docs)
-
     msg = chat.extract_thinking_tag(msg, st)
 
-    return msg, image_url, reference
+    return msg
