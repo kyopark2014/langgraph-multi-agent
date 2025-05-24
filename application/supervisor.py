@@ -189,7 +189,7 @@ def run_langgraph_supervisor(query, st):
     if not isInitiated:
         # creater search agent
         search_agent = create_collaborator(
-            [tool_use.search_by_tavily, tool_use.search_by_knowledge_base], 
+            [tool_use.search_by_tavily], 
             "search_agent", st
         )
         # creater stock agent

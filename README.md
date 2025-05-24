@@ -1,267 +1,238 @@
 # LangGraph로 Multi Agent의 구현
 
-MCP(Model Context Protocol)은 생성형 AI application이 외부 데이터를 활용하는 주요한 인터페이스로 빠르게 확산되고 있습니다. 2024년 11월에 Anthropic의 오픈소스 프로젝트로 시작되었고, 현재 Cursor뿐 아니라 OpenAI에서도 지원하고 있습니다. 여기에서는 [MCP with LangChain](https://github.com/langchain-ai/langchain-mcp-adapters)을 이용하여 LangGraph로 만든 application이 MCP를 활용하는 방법에 대해 설명합니다. 여기서 구현한 RAG는 Amazon의 완전관리형 RAG 서비스인 Knowledge base로 구현되었으므로, 문서의 텍스트 추출, 동기화, chunking과 같은 작업을 손쉽게 수행할 수 있으며, 멀티모달을 이용해 이미지/표를 분석할 수 있습니다. 여기에서는 MCP server에서 RAG에 손쉽게 접근할 수 있도록 AWS Lambda를 이용해 API를 구성하였습니다.
+여기서는 LangGraph를 이용헤 multi agent를 구현하는 3가지 방법에 대해 설명합니다. 
 
+## Multi-agent Supervisor (Router)
 
-아래 architecture는 AWS 환경에서 MCP를 포함한 Agent를 구성하는것을 보여줍니다. Agent는 MCP server/client 구조를 활용하여 외부의 데이터 소스를 활용할 수 있습니다. MCP client는 MCP server와 JSON-RPC 프로토콜에 기반하여 stdio/SSE로 통신을 수행합니다. Stdio 사용시 MCP Server는 python, java와 같은 코드로 구성이 되고, client에서 요청이 오면 RAG나 인터넷등을 이용해 데이터를 수집하거나 전달하는 역할을 수행합니다. SSE로 할 경우에 MCP client와 server는 IP로 통신을 하게 됩니다. 여기서는 Streamlit을 이용해 application의 UI를 구성하고, 사용자는 ALB - CloudFront를 이용해 HTTPS 방식으로 브라우저를 통해 application을 이용합니다. 또한, 여기에서는 커스터마이징이 유리한 LangGraph를 이용해 MCP 기반의 application을 개발하는것을 설명합니다. 
+여기에서는 multi-agent supervisor (Router) 방식으로 multi-agent collaboration을 구현하는것에 대해 설명합니다.
 
-<img src="https://github.com/user-attachments/assets/a263f0fa-22f1-483b-8936-a59429ace173" width="750">
-
-
-## MCP 활용
-
-### MCP Basic
-
-사용자는 자신의 Computer에 설치된 Claude Desktop, Cursor와 같은 AI 도구뿐 아니라 주로 Agent형태로 개발된 어플리케이션을 통해 MCP 서버에 연결할 수 있습니다. MCP server는 MCP client의 요청에 자신이 할수 있는 기능을 capability로 제공하고 client의 요청을 수행합니다. MCP server는 local computer의 파일이나 데이터베이스를 조회할 수 있을뿐 아니라 인터넷에 있는 외부 서버의 API를 이용해 필요한 정보를 조회할 수 있습니다. MCP Client는 Server와 JSON-RPC 2.0 프로토콜을 이용해 연결되는데, stdio나 SSE (Server-Sent Events)을 선택하여, Host의 요청을 MCP에 전달할 수 있고, 응답을 받아서 활용할 수 있습니다.  
-
-<img src="https://github.com/user-attachments/assets/36d2d24c-865b-4b71-b708-5c611ab7785e" width="750">
-
-
-MCP의 주요 요소의 정의와 동작은 아래와 같습니다.
-
-- MCP Hosts: MCP 프로토콜을 통해 데이터에 접근하는 프로그램/AI 도구로서 Claude Desktop, Cursor, User Agent Application이 해당됩니다.
-- MCP Clients: MCP Server와 1:1로 연결을 수행하는 Client로서 MCP Server와 stdio 또는 SSE 방식으로 연결할 수 있습니다.
-- MCP Servers: 표준화된 MCP를 통해 Client에 Tool의 Capability를 알려주는 경량 프로그램으로 Local Computer의 파일이나 데이터베이스를 조회할 수 있고, 외부 API를 이용해 정보를 조회할 수 있습니다.
-- Local data sources: MCP 서버가 접근할 수 있는 데이터베이스와 로컬 데이터
-- Remote services: API를 통해 접근 가능한 외부 시스템
-
-MCP를 사용하면 아래와 같은 장점이 있습니다.
-
-- 표준화된 방식으로 다양한 데이터 소스에 접근 가능합니다.
-- 애플리케이션 코드 변경 없이 MCP 서버 업데이트를 통한 새로운 기능 추가할 수 있습니다.
-- 조직 전반에 걸쳐 AI 지원 및 확장이 용이합니다.
-
-
-[MCP Server Components](https://www.philschmid.de/mcp-introduction)에는 아래와 같은 항목이 있습니다. 
-
-- Tools (Model-controlled): LLM이 특정 작업을 수행하기 위해 호출할 수 있는 기능(도구)으로서, API와 같이 특정한 action을 수행합니다. 
+아래와 같이 state와 router를 정의합니다. 
 
 ```python
-tools = await session.list_tools()
+class State(MessagesState):
+    next: str
+    answer: str
+
+members = ["search_agent", "code_agent", "weather_agent"]
+
+class Router(TypedDict):
+    """Worker to route to next. If no workers needed, route to FINISH."""
+    next: Literal["search_agent", "code_agent", "weather_agent", "FINISH"]
 ```
 
-- Resources (Application-controlled): 생성형 AI 어플리케이션이 접근 할 수 있는 데이터 소스입니다. 복잡한 계산(significant computation)이나 부작용(side effect)없이 데이터를 가져올 수 있습니다. 
+이때의 supervisor node는 아래와 같습니다.
 
 ```python
-resources = await session.list_resources()
-```
-
-- Prompts (User-controlled): tool나 resource를 사용할때에 이용하는 사전 정의된 템플렛으로서 추론(inference)전에 선택할 수 있습니다.
-
-```python
-prompts = await session.list_prompts()
-```
+def supervisor_node(state: State):
+    prompt = ChatPromptTemplate.from_messages(
+        [
+            ("system", system_prompt),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    )
+    structured_llm = llm.with_structured_output(Router, include_raw=True)
+    
+    chain = prompt | structured_llm
+                
+    messages = state['messages']
   
-### LangChain MCP Adapter
+    response = chain.invoke({"messages": messages})
+    parsed = response.get("parsed")
+  
+    goto = parsed["next"]
+    if goto == "FINISH":            
+        goto = END
 
-[LangChain MCP Adapter](https://github.com/langchain-ai/langchain-mcp-adapters)는 MCP를 LangGraph agent와 함께 사용할 수 있게 해주는 경량의 랩퍼(lightweight wrapper)로서 MIT 기반의 오픈소스입니다. MCP Adapter의 주된 역할은 MCP server를 위한 tool들을 정의하고, MCP client에서 tools의 정보를 조회하고 LangGraph의 tool node로 정의하여 활용할 수 있도록 도와줍니다. 
+    return Command(goto=goto, update={"next": goto})
+```
 
-#### 사전 준비
+아래와 같이 agent들을 정의합니다.
 
-MCP와 LangChain MCP Adapter를 아래와 같이 설치합니다.
+```python
+search_agent = create_collaborator(
+    [tool_use.search_by_tavily, tool_use.search_by_knowledge_base], 
+    "search_agent", st
+)
+
+weather_agent = create_collaborator(
+    [tool_use.get_weather_info], 
+    "weather_agent", st
+)
+
+code_agent = create_collaborator(
+    [tool_use.repl_coder, tool_use.repl_drawer], 
+    "code_agent", st
+)
+```
+
+Search, code, weather agent들을 정의합니다.
+
+```python
+def search_node(state: State) -> Command[Literal["supervisor"]]:
+    result = search_agent.invoke(state)
+
+    return Command(
+        update={
+            "messages": [
+                AIMessage(content=result["messages"][-1].content, name="search_agent")
+            ]
+        },
+        goto = "supervisor",
+    )
+
+def code_node(state: State) -> Command[Literal["supervisor"]]:
+    result = code_agent.invoke(state)
+
+    return Command(
+        update={
+            "messages": [
+                AIMessage(content=result["messages"][-1].content, name="code_agent")
+            ]
+        },
+        goto = "supervisor",
+    )
+
+def weather_node(state: State) -> Command[Literal["supervisor"]]:
+    result = weather_agent.invoke(state)
+
+    return Command(
+        update={
+            "messages": [
+                AIMessage(content=result["messages"][-1].content, name="weather_agent")
+            ]
+        },
+        goto = "supervisor",
+    )
+```
+
+아래와 같이 workflow를 정의합니다.
+
+```python
+def build_graph():
+    workflow = StateGraph(State)
+    workflow.add_edge(START, "supervisor")
+    workflow.add_node("supervisor", supervisor_node)
+    workflow.add_node("search_agent", search_node)
+    workflow.add_node("code_agent", code_node)
+    workflow.add_node("weather_agent", weather_node)
+
+    return workflow.compile()
+````
+
+이제 아래와 같이 실행할 수 있습니다.
+
+```python
+inputs = [HumanMessage(content=query)]
+config = {
+    "recursion_limit": 50
+}    
+result = app.invoke({"messages": inputs}, config)
+
+msg = result['messages'][-1].content
+```
+
+### 실행결과 
+#### Weather Agent
+
+"서울과 제주 날씨를 비교해주세요."로 입력 후에 결과를 확인합니다.
+
+![noname](https://github.com/user-attachments/assets/ac8cbc2b-e8d9-4e41-8f3b-58b5109f2d02)
+
+
+
+#### Code Agent 
+
+"strawberry의 r의 갯수는?"라고 입력후 결과를 확인합니다. 
+
+![image](https://github.com/user-attachments/assets/a8e9f8d1-53a1-45af-8c8d-53d18b45ac92)
+
+
+#### Search Agent
+
+"강남역 맛집은?"으로 입력후 결과를 확인합니다.
+
+![noname](https://github.com/user-attachments/assets/7903e6c5-c90c-48e3-a19c-7b03bf5d9ba6)
+
+
+
+
+## LangGraph Supervisor
+
+[LangGraph Multi-Agent Supervisor](https://github.com/langchain-ai/langgraph-supervisor-py)을 이용하면 multi-agent collaboration을 구현합니다.
+
+이를 위해 langgraph-supervisor을 설치합니다.
 
 ```text
-pip install mcp langchain-mcp-adapters
+pip install langgraph-supervisor
 ```
 
-#### MCP Server
+동작은 아래와 같습니다.
 
-RAG 검색을 위한 MCP server는 아래와 같이 정의할 수 있습니다. Server의 transport를 "stdio"로 지정하면 server를 지속 실행시키지 않더라도, client가 server의 python code를 직접 실행할 수 있어서 편리합니다. 
+![image](https://github.com/user-attachments/assets/b7ec2913-804b-4b4a-a1a9-d972ddb9a591)
 
-```python
-from mcp.server.fastmcp import FastMCP 
 
-mcp = FastMCP(
-    name = "Search",
-    instructions=(
-        "You are a helpful assistant. "
-        "You can search the documentation for the user's question and provide the answer."
-    ),
-) 
-
-@mcp.tool()
-def search(keyword: str) -> str:
-    "search keyword"
-
-    return retrieve_knowledge_base(keyword)
-
-if __name__ =="__main__":
-    print(f"###### main ######")
-    mcp.run(transport="stdio")
-```
-
-Server는 요청이 들어오면, retrieve_knowledge_base()로 RAG 검색을 수행합니다. Server의 python code는 경량(lightweight)이어야 하므로, 아래와 같이 lambda를 trigger하는 방식으로 구성하였습니다. Lambda에서는 retrieve, grade, generation의 동작을 수행합니다. 아래와 같이 "model_name"을 지정할 수 있고, 필요에 따라서는 "grading"을 선택적으로 사용할 수 있습니다. 또한 병렬처리로 속도를 빠르게 하고 싶은 경우에은 "multi_region"을 "Enable"로 설정합니다. 상세한 코드는 [lambda-rag](./lambda-rag/lambda_function.py)를 참조합니다. 
+아래와 같이 collaborator들을 준비합니다.
 
 ```python
-def retrieve_knowledge_base(query):
-    lambda_client = boto3.client(
-        service_name='lambda',
-        region_name=bedrock_region
-    )
-    functionName = f"lambda-rag-for-{projectName}"
-    payload = {
-        'function': 'search_rag',
-        'knowledge_base_name': knowledge_base_name,
-        'keyword': query,
-        'top_k': numberOfDocs,
-        'grading': "Enable",
-        'model_name': model_name,
-        'multi_region': multi_region
-    }
-    output = lambda_client.invoke(
-        FunctionName=functionName,
-        Payload=json.dumps(payload),
-    )
-    payload = json.load(output['Payload'])
-    return payload['response'], []
-```
+search_agent = create_collaborator(
+    [search_by_tavily, search_by_knowledge_base], 
+    "search_agent", st
+)
+stock_agent = create_collaborator(
+    [stock_data_lookup], 
+    "stock_agent", st
+)
+weather_agent = create_collaborator(
+    [get_weather_info], 
+    "weather_agent", st
+)
+code_agent = create_collaborator(
+    [code_drawer, code_interpreter], 
+    "code_agent", st
+)
 
-#### MCP Client
-
-MCP client이 하나의 MCP server만 볼 경우에는 아래와 같이 stdio_client와 StdioServerParameters를 이용해 구현할 수 있습니다. MCP server에 대한 정보는 config.json에서 읽어오거나 streamlit에서 사용자가 입력한 정보를 사용할 수 있습니다. load_mcp_server_parameters()에서는 mcp_json을 읽어와서 [StdioServerParameters](https://github.com/langchain-ai/langchain-mcp-adapters)을 구성합니다. config.json의 MCP server에 대한 정보는 AWS CDK로 배포후 생성되는 output에서 가져옵니다.
-
-```python
-from mcp import ClientSession, StdioServerParameters
-
-def load_mcp_server_parameters():
-    mcp_json = json.loads(mcp_config)
-    mcpServers = mcp_json.get("mcpServers")
-
-    command = ""
-    args = []
-    if mcpServers is not None:
-        for server in mcpServers:
-            config = mcpServers.get(server)
-            if "command" in config:
-                command = config["command"]
-            if "args" in config:
-                args = config["args"]
-            break
-
-    return StdioServerParameters(
-        command=command,
-        args=args
-    )
-```
-
-아래와 같이 MCP server에 대한 정보로 stdio_client를 구성합니다. 이때 tools에 대한 정보를 load_mcp_tools로 가져옵니다. Agent에서는 tool 정보를 bind하고 ainvoke를 이용해 요청된 동작을 수행합니다. 
-
-```python
-from mcp.client.stdio import stdio_client
-from langchain_mcp_adapters.tools import load_mcp_tools
-
-async def mcp_rag_agent_single(query, st):
-    server_params = load_mcp_server_parameters()
-
-    async with stdio_client(server_params) as (read, write):
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            tools = await load_mcp_tools(session)
-            with st.status("thinking...", expanded=True, state="running") as status:       
-                agent = create_agent(tools)
-                agent_response = await agent.ainvoke({"messages": query})                
-
-                result = agent_response["messages"][-1].content
-            st.markdown(result)
-            st.session_state.messages.append({
-                "role": "assistant", 
-                "content": result
-            })            
-            return result
-```
-
-MCP client는 아래와 같이 실행합니다. 비동기적으로 실행하기 위해서 asyncio를 이용하였습니다.  이후 사용자가 UI에서 MCP Config를 업데이트하면 정보를 업데이트 할 수 있습니다. 
-
-```python
-asyncio.run(mcp_rag_agent_single(query, st))
-```
-
-서버 정보가 여럿인 경우에 [langchain-mcp-adapters](https://github.com/langchain-ai/langchain-mcp-adapters)에서 제공하는 MultiServerMCPClient을 이용합니다. 먼저, 아래와 같이 서버 정보를 가져옵니다. 
-
-```python
-def load_multiple_mcp_server_parameters():
-    mcp_json = json.loads(mcp_config)
-    mcpServers = mcp_json.get("mcpServers")
-
-    server_info = {}
-    if mcpServers is not None:
-        command = ""
-        args = []
-        for server in mcpServers:
-            config = mcpServers.get(server)
-            if "command" in config:
-                command = config["command"]
-            if "args" in config:
-                args = config["args"]
-
-            server_info[server] = {
-                "command": command,
-                "args": args,
-                "transport": "stdio"
-            }
-    return server_info
-```
-
-이후 아래와 같이 MCP server정보와 MultiServerMCPClient로 client를 정의합니다. MCP server로 부터 가져온 tool 정보는 client.get_tools()로 가져와서 agent를 생성할 때에 사용합니다. Single MCP server와 마찬가지로 ainvoke로 실행하여 결과를 얻을 수 있습니다. 
-
-```python
-from langchain_mcp_adapters.client import MultiServerMCPClient
-asyncio.run(mcp_rag_agent_multiple(query, st))
-
-async def mcp_rag_agent_multiple(query, st):
-    server_params = load_multiple_mcp_server_parameters()
-    async with  MultiServerMCPClient(server_params) as client:
-        with st.status("thinking...", expanded=True, state="running") as status:                       
-            tools = client.get_tools()
-            agent = create_agent(tools)
-            response = await agent.ainvoke({"messages": query})
-            result = response["messages"][-1].content
-
-        st.markdown(result)
-        st.session_state.messages.append({
-            "role": "assistant", 
-            "content": result
-        })
-    return result
-```
-
-여기서는 customize가 용이하도록 agent를 정의하였습니다.
-
-```python
-def create_agent(tools):
+def create_collaborator(tools, name, st):
+    chatModel = chat.get_chat(extended_thinking="Disable")
+    model = chatModel.bind_tools(tools)
     tool_node = ToolNode(tools)
 
-    chatModel = get_chat(extended_thinking="Disable")
-    model = chatModel.bind_tools(tools)
-
-    class State(TypedDict):
+    class State(TypedDict): 
         messages: Annotated[list, add_messages]
-
-    def call_model(state: State, config):
-        system = (
-            "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다."
-            "상황에 맞는 구체적인 세부 정보를 충분히 제공합니다."
-            "모르는 질문을 받으면 솔직히 모른다고 말합니다."
-            "한국어로 답변하세요."
-        )
-        try:
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    ("system", system),
-                    MessagesPlaceholder(variable_name="messages"),
-                ]
-            )
-            chain = prompt | model                
-            response = chain.invoke(state["messages"])
-        return {"messages": [response]}
+        name: str
 
     def should_continue(state: State) -> Literal["continue", "end"]:
         messages = state["messages"]    
         last_message = messages[-1]
-        if isinstance(last_message, AIMessage) and last_message.tool_calls:
+        if last_message.tool_calls:
             return "continue"        
         else:
             return "end"
+           
+    def call_model(state: State, config):
+        last_message = state['messages'][-1]
+                
+        if chat.isKorean(state["messages"][0].content)==True:
+            system = (
+                "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다."
+                f"당신의 역할은 {name}입니다."
+                "당신의 역할에 맞는 답변만을 정확히 제공합니다."
+                "모르는 질문을 받으면 솔직히 모른다고 말합니다."      
+            )
+        else: 
+            system = (            
+                "You are a conversational AI designed to answer in a friendly way to a question."
+                "If you don't know the answer, just say that you don't know, don't try to make up an answer."
+            )
+
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", system),
+                MessagesPlaceholder(variable_name="messages"),
+            ]
+        )
+        chain = prompt | model
+        response = chain.invoke(state["messages"])
+        return {"messages": [response]}
 
     def buildChatAgent():
         workflow = StateGraph(State)
@@ -277,472 +248,178 @@ def create_agent(tools):
             },
         )
         workflow.add_edge("action", "agent")
-        return workflow.compile() 
+        return workflow.compile(name=name)
     
     return buildChatAgent()
 ```
 
-## MCP Servers의 활용
-
-[Model Context Protocol servers](https://github.com/modelcontextprotocol/servers)에서도 아래와 같은 서버들에 대한 정보를 제공하고 있습니다.
-
-- [Perplexity Ask MCP Server](https://github.com/ppl-ai/modelcontextprotocol)
-- [Riza MCP Server](https://github.com/riza-io/riza-mcp)
-- [Tavily MCP Server](https://github.com/tavily-ai/tavily-mcp)
-
-[Smithery](https://smithery.ai/)에서 MCP server를 찾아보고 필요한 서버를 찾으면 접속할 수 있는 MCP 서버 정보를 JSON 형태로 조회할 수 있습니다. 
-
-<img src="https://github.com/user-attachments/assets/62e534ee-88bd-4f9f-a4ff-129522fd834f" width="500">
-
-[Smithery - Google Search Server](https://smithery.ai/server/@gradusnikov/google-search-mcp-server)에서 확인한 구글 검색용 MCP 서버 정보는 아래와 같습니다. 검색엔진 ID와 API Key를 필요로 합니다. 
-
-```java
-{
-  "mcpServers": {
-    "google-search-mcp-server": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@smithery/cli@latest",
-        "run",
-        "@gradusnikov/google-search-mcp-server",
-        "--config",
-        "{\"googleCseId\":\"b5cd8c527fbd64b72\",\"googleApiKey\":\"AIzbSyDQlYpck8-9TbBSuxoew1luOGVB6unRPNk\"}"
-      ]
-    }
-  }
-}
-```
-
-아래와 같이 json 형식의 서버정보를 업데이트 할 수 있습니다. 아래에서는 [mcp-server.py](./application/mcp-server.py)에서 정의한 search를 이용하고 있습니다.
-
-```java
-{
-  "mcpServers": {
-    "search": {
-      "command": "python",
-      "args": [
-        "application/mcp-server.py"
-      ]
-    }
-  }
-}
-```
-
-### 실행하기
-
-Output의 environmentformcprag의 내용을 복사하여 application/config.json을 생성합니다. "aws configure"로 credential이 설정되어 있어야합니다. 만약 visual studio code 사용자라면 config.json 파일은 아래 명령어를 사용합니다.
-
-```text
-code application/config.json
-```
-
-venv로 환경을 구성하면 편리합니다. 아래와 같이 환경을 설정합니다.
-
-```text
-python -m venv .venv
-source .venv/bin/activate
-pip install uv
-```
-
-이후 다운로드 받은 github 폴더로 이동한 후에 아래와 같이 필요한 패키지를 추가로 설치 합니다.
-
-```text
-pip install -r reuqirements.txt
-```
-
-[deployment.md](./deployment.md)에 따라 AWS CDK로 Lambda, Knowledge base, Opensearch Serverless와 보안에 필요한 IAM Role을 설치합니다. 이후 아래와 같은 명령어로 streamlit을 실행합니다. 
-
-```text
-streamlit run application/app.py
-```
-
-
-### EC2에 배포하기
-
-EC2가 private subnet에 있으므로 Session Manger로 접속합니다. 이때 설치는 ec2-user로 진행되었으므로 아래와 같이 code를 업데이트합니다.
-
-```text
-sudo runuser -l ec2-user -c 'cd /home/ec2-user/mcp && git pull'
-```
-
-이제 아래와 같이 docker를 빌드합니다.
-
-```text
-sudo runuser -l ec2-user -c "cd mcp && docker build -t streamlit-app ."
-```
-
-빌드가 완료되면 "sudo docker ps"로 docker id를 확인후에 "sudo docker kill" 명령어로 종료합니다.
-
-![noname](https://github.com/user-attachments/assets/4afb2af8-d092-4aaa-813a-65975375f7d4)
-
-이후 아래와 같이 다시 실행합니다.
-
-```text
-sudo runuser -l ec2-user -c 'docker run -d -p 8501:8501 streamlit-app'
-```
-
-만약 console에서 debugging할 경우에는 -d 옵션없이 아래와 같이 실행합니다.
-
-```text
-sudo runuser -l ec2-user -c 'docker run -p 8501:8501 streamlit-app'
-```
-
-
-### MCP Inspector
-
-Development Mode에서 mcp server를 테스트 하기 위해 MCP inspector를 이용할 수 있습니다. 아래와 같이 cli를 설치합니다. 
-
-```text
-pip install 'mcp[cli]'
-```
-
-이후 아래와 같이 실행하면 쉽게 mcp-server.py의 동작을 테스트 할 수 있습니다. 실행시 http://localhost:5173 와 같은 URL을 제공합니다.
-
-```text
-mcp dev mcp-server.py
-```
-
-### AWS Cost Analysis
-
-MCP tool로서 아래와 같이 AWS cost 정보를 가져와서 분석할 수 있습니다.
+Supervisor agent는 아래와 같이 생성합니다.
 
 ```python
-from datetime import datetime, timedelta
-import pandas as pd
+from langgraph_supervisor import create_supervisor, create_handoff_tool
 
-def get_cost_analysis(days: str=30):
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=days)    
-    ce = boto3.client('ce')
-    service_response = ce.get_cost_and_usage(
-        TimePeriod={
-            'Start': start_date.strftime('%Y-%m-%d'),
-            'End': end_date.strftime('%Y-%m-%d')
-        },
-        Granularity='MONTHLY',
-        Metrics=['UnblendedCost'],
-        GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
-    )        
-    service_costs = pd.DataFrame([
-        {
-            'SERVICE': group['Keys'][0],
-            'cost': float(group['Metrics']['UnblendedCost']['Amount'])
-        }
-        for group in service_response['ResultsByTime'][0]['Groups']
-    ])
-        
-    # region cost
-    region_response = ce.get_cost_and_usage(
-        TimePeriod={
-            'Start': start_date.strftime('%Y-%m-%d'),
-            'End': end_date.strftime('%Y-%m-%d')
-        },
-        Granularity='MONTHLY',
-        Metrics=['UnblendedCost'],
-        GroupBy=[{'Type': 'DIMENSION', 'Key': 'REGION'}]
-    )
-    region_costs = pd.DataFrame([
-        {
-            'REGION': group['Keys'][0],
-            'cost': float(group['Metrics']['UnblendedCost']['Amount'])
-        }
-        for group in region_response['ResultsByTime'][0]['Groups']
-    ])
-        
-    # Daily Cost
-    daily_response = ce.get_cost_and_usage(
-        TimePeriod={
-            'Start': start_date.strftime('%Y-%m-%d'),
-            'End': end_date.strftime('%Y-%m-%d')
-        },
-        Granularity='DAILY',
-        Metrics=['UnblendedCost'],
-        GroupBy=[{'Type': 'DIMENSION', 'Key': 'SERVICE'}]
-    )    
-    daily_costs = []
-    for time_period in daily_response['ResultsByTime']:
-        date = time_period['TimePeriod']['Start']
-        for group in time_period['Groups']:
-            daily_costs.append({
-                'date': date,
-                'SERVICE': group['Keys'][0],
-                'cost': float(group['Metrics']['UnblendedCost']['Amount'])
-            })    
-    daily_costs_df = pd.DataFrame(daily_costs)
-        
-    return {
-        'service_costs': service_costs,
-        'region_costs': region_costs,
-        'daily_costs': daily_costs_df
-    }
+workflow = create_supervisor(
+    agents=agents,
+    state_schema=State,
+    model=chat.get_chat(extended_thinking="Disable"),
+    prompt = (
+        "당신의 이름은 서연이고, 질문에 친근한 방식으로 대답하도록 설계된 대화형 AI입니다."
+        f"질문에 대해 충분한 정보가 모아질 때까지 다음의 agent를 선택하여 활용합니다. agents: {agents}"
+        "모든 agent의 응답을 모아서, 충분한 정보를 제공합니다."
+        "모르는 질문을 받으면 솔직히 모른다고 말합니다."
+    ),
+    tools=[
+        create_handoff_tool(
+            agent_name="search_agent", 
+            name="assign_to_search_expert", 
+            description="search internet or RAG to answer all general questions such as restronent"),
+        create_handoff_tool(
+            agent_name="stock_agent", 
+            name="assign_to_stock_expert", 
+            description="retrieve stock trend"),
+        create_handoff_tool(
+            agent_name="weather_agent", 
+            name="assign_to_weather_expert", 
+            description="earn weather informaton"),
+        create_handoff_tool(
+            agent_name="code_agent", 
+            name="assign_to_code_expert", 
+            description="generate a code to solve a complex problem")
+    ],
+    supervisor_name="langgraph_supervisor",
+    output_mode="full_history" # last_message full_history
+)        
+supervisor_agent = workflow.compile(name="superviser")
 ```
 
-cost의 상기 3가지 결과를 그래프로 사용하기 위해서는 아래 패키지 설치가 필요합니다.
-
-```text
-pip install -U kaleido
-```
-
-### MCP Image Generation
-
-[mcp_server_image_generation.py](./application/mcp_server_image_generation.py)과 같이 mcp_generate_image와 mcp_generate_image_with_colors을 tool로 등록합니다. 
-
-MCP config는 아래와 같이 설정합니다. [mcp_config.py](./application/mcp_config.py)을 참조합니다.
-
-```java
-{
-    "mcpServers": {
-        "imageGeneration": {
-            "command": "python",
-            "args": [
-                "application/mcp_server_image_generation.py"
-            ]
-        }
-    }
-}
-```
-
-이후 [mcp_nova_canvas.py](./application/mcp_nova_canvas.py)와 같이 이미지를 생성합니다.
+아래와 같이 실행합니다.
 
 ```python
-async def mcp_generate_image(ctx, prompt, negative_prompt, filename, width, height, quality, cfg_scale, seed, number_of_images):
-    """Generate an image using Amazon Nova Canvas with text prompt."""
+inputs = [HumanMessage(content=query)]
+    config = {
+        "recursion_limit": 50
+    }
     
-    response = await generate_image_with_text(
-        prompt=prompt,
-        negative_prompt=negative_prompt,
-        filename=filename,
-        width=width,
-        height=height,
-        quality=quality,
-        cfg_scale=cfg_scale,
-        seed=seed,
-        number_of_images=number_of_images
-    )
-
-    return {
-        "url": [f'{path}' for path in response.paths]
-    } 
+    result = supervisor_agent.invoke({"messages": inputs}, config)
+    msg = result["messages"][-1].content
 ```
 
-MCP의 image_generation로 부터 얻은 결과는 아래와 같이 표시합니다. 상세한 내용은 [chat.py](./application/chat.py)을 참고하세요.
+### 실행 결과
 
-```python
-def show_status_message(response, st):
-    image_url = []
-    for i, re in enumerate(response):
-        logger.info(f"message[{i}]: {re}")
-        if i==len(response)-1:
-            break
-        if isinstance(re, ToolMessage):
-          tool_result = json.loads(re.content)
-          logger.info(f"tool_result: {tool_result}")
+"서울 날씨는?"로 입력후 결과를 확인합니다.
 
-          if "url" in tool_result:
-              st.info(f"URL: {tool_result['url']}")
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/419f8ec9-1533-414a-9fae-f790538623b7" />
 
-              urls = tool_result['url']
-              for url in urls:
-                  image_url.append(url)
-                  st.image(url)
-    return image_url
-```
 
-### MCP AWS Diagram
+"strawberry의 r의 갯수는?
 
-[AWS Diagram MCP Server](https://awslabs.github.io/mcp/servers/aws-diagram-mcp-server/)을 이용하면 AWS Diagram을 그릴 수 있습니다. 상세한 내용은 [mcp_config.py](./application/mcp_config.py)을 참조합니다.
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/4f988649-0c2a-499b-abca-1bc9ac6f11dd" />
 
-이때 사용하는 MCP Config는 아래와 같습니다.
 
-```python
-{
-    "mcpServers": {
-        "awslabs.aws-diagram-mcp-server": {
-            "command": "uvx",
-            "args": ["awslabs.aws-diagram-mcp-server"],
-            "env": {
-                "FASTMCP_LOG_LEVEL": "ERROR"
-            },
-        }
-    }
-}
-```
+"서울에서 부산을 거쳐서 제주로 가려고 합니다. 가는 동안의 날씨와 지역 맛집을 검색해서 추천해주세요."로 입력후 결과를 확인합니다. 
 
-Diagram을 그리기 위해서는 [Graphviz](https://www.graphviz.org/download/)를 따라서 graphviz를 설치합니다. Mac에서는 아래 명령어를 사용합니다.
+<img width="700" alt="image" src="https://github.com/user-attachments/assets/d8deb7ab-1b13-4ef4-a179-62f9044c981e" />
+
+
+
+
+
+## LangGraph Swarm
+
+[LangGraph Multi-Agent Swarm](https://github.com/langchain-ai/langgraph-swarm-py/tree/main)와 같이 때로는 agent가 직접 메시지 및 history를 공유함으로써 multi-agent를 구성하는것이 좋을수도 있습니다. [Swarm](https://github.com/openai/swarm)은 agent간에 handoff가 가능합니다. 아래에서는 [LangGraph Swarm](https://www.youtube.com/watch?v=iqXn6Oiis4Q)을 참조하여 multi-agent를 구성하는 것을 설명합니다.
+
+<img src="https://github.com/user-attachments/assets/8f719734-9644-4d26-990f-b771c999afc5" width="700">
+
+
+Swarm agent가 search와 weather agent를 가졌을 때의 결과입니다.
+
+<img src="https://github.com/user-attachments/assets/4f3fde50-9a73-40f1-88e6-d839c2f2ce8a" width="400">
+
+Swarm agent에 search, code, weather agent의 구조를 가졌을때의 모습니다. Agent들이 mash 형태로 서로 연결되어 있다면 agent들이 증가할 때마다 복잡도가 높아집니다.
+
+<img src="https://github.com/user-attachments/assets/80c5f0c3-c849-4025-b482-cbfc882c3020" width="700">
+
+
+아래와 같이 LangGraph의 Swarm을 설치합니다.
 
 ```text
-brew install graphviz
+pip install langgraph-swarm
 ```
 
-### MCP AWS Documentation
-
-[AWS Documentation MCP Server](https://awslabs.github.io/mcp/servers/aws-documentation-mcp-server/)을 이용하여 AWS 문서들을 조회할 수 있습니다. 이때 사용하는 MCP config는 아래와 같습니다. 상세한 내용은 [mcp_config.py](./application/mcp_config.py)을 참조합니다.
-
-```java
-{
-    "mcpServers": {
-        "awslabs.aws-documentation-mcp-server": {
-            "command": "uvx",
-            "args": ["awslabs.aws-documentation-mcp-server@latest"],
-            "env": {
-                "FASTMCP_LOG_LEVEL": "ERROR"
-            }
-        }
-    }
-}
-```
-
-
-## 실행 결과
-
-### MCP로 RAG를 조회하여 활용하기
-
-[error_code.pdf](./contents/error_code.pdf)을 다운로드 한 후에 파일을 업로드합니다. 이후 아래와 같이 "보일러 에러중 수압과 관련된 에러 코드를 검색해주세요."와 같이 입력하면 mcp를 이용해 tool의 정보를 가져오고, search tool로 얻어진 정보를 이용해 아래와 같은 정보를 보여줄 수 있습니다. 이때 search tool은 lambda를 실행하는데 lambda에서는 완전 관리형 RAG 서비스인 knowledge base를 이용하여 검색어를 조회하고 관련성을 평가한 후에 관련된 문서만을 전달합니다. Agent는 RAG를 조회하여 얻어진 정보로 답변을 아래와 같이 구합니다.
-
-<img src="https://github.com/user-attachments/assets/01b5e47f-ada1-405e-8455-3d3ce260cb41" width="650">
-
-### MCP로 인터넷 검색을 하여 활용하기
-
-[smithery-Tavily](https://smithery.ai/server/mcp-tavily)에 접속하여 환경에 맞는 설정값을 얻어옵니다. 아래는 Mac/Linux의 JSON format의 접속 정보입니다.
-
-```java
-{
-  "mcpServers": {
-    "mcp-tavily": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@smithery/cli@latest",
-        "run",
-        "mcp-tavily",
-        "--key",
-        "132c5abd-6f2e-4e42-89a1-d0b1fcb75613"
-      ]
-    }
-  }
-}
-```
-
-아래는 기본 설정된 RAG를 위한 정보입니다.
-
-```java
-{
-  "mcpServers": {
-    "search": {
-      "command": "python",
-      "args": [
-        "application/mcp-server.py"
-      ]
-    }
-  }
-}
-```
-
-아래는 multiple mcp server를 설정시 config 입니다.
+search agent가 weather agent로 이동하기 위해서, create_handoff_tool로 transfer_to_search_agent을 정의합니다. 마찬가지로 weather agent에서 search agent로 이동하기 위한 transfer_to_weather_agent을 아래와 같이 정의합니다.
 
 ```python
-{
-   "mcpServers":{
-      "RAG":{
-         "command":"python",
-         "args":[
-            "application/mcp-server.py"
-         ]
-      },
-      "mcp-tavily":{
-         "command":"npx",
-         "args":[
-            "-y",
-            "@smithery/cli@latest",
-            "run",
-            "mcp-tavily",
-            "--key",
-            "132c5abd-6f2e-4e42-89a1-d0b1fcb75613"
-         ]
-      }
-   }
-}
+from langgraph_swarm import create_handoff_tool
+
+transfer_to_search_agent = create_handoff_tool(
+    agent_name="search_agent",
+    description="Transfer the user to the search_agent for search questions related to the user's request.",
+)
+transfer_to_weather_agent = create_handoff_tool(
+    agent_name="weather_agent",
+    description="Transfer the user to the weather_agent to look up weather information for the user's request.",
+)
 ```
 
-이 정보를 아래와 같이 왼쪽 메뉴의 MCP Config에 복사합니다.
+이제 collaborator로 search와 weather agent를 정의합니다. search agent는 tavily 검색과 완전관리형 RAG 서비스인 search_by_knowledge_base를 가지고 있고, weather에서 search로 이동하기 위한 transfer_to_search_agent가 있습니다. weather agent는 날씨 검색을 위한 get_weather_info라는 tool과 weather에서 search agent로 전환을 위한 transfer_to_search_agent을 가지고 있습니다.
 
-<img src="https://github.com/user-attachments/assets/0e054f8e-4356-42e0-a70e-636af8d377c8" width="300">
+```python
+# creater search agent
+search_agent = create_collaborator(
+    [search_by_tavily, search_by_knowledge_base, transfer_to_weather_agent], 
+    "search_agent", st
+)
 
+# creater weather agent
+weather_agent = create_collaborator(
+    [get_weather_info, transfer_to_search_agent], 
+    "weather_agent", st
+)
+```
 
-이후 메뉴에서 "Agent"를 선택후에 아래와 같이 "강남역 맛집은?"라고 입력후 결과를 확인합니다.
+이제 creat_swarm을 이용하여 swarm_agent을 준비합니다. swarm_agent는 search와 weather agent들을 가지고 있고, default로 search agent를 이용합니다. 
 
-<img src="https://github.com/user-attachments/assets/8275bf94-2f46-475d-9eea-02568e70199b" width="650">
+```python
+from langgraph_swarm import create_swarm
 
-### AWS Cost Analysis
+swarm_agent = create_swarm(
+    [search_agent, weather_agent], default_active_agent="search_agent"
+)
+langgraph_app = swarm_agent.compile()
+```
 
-"지난 한달간의 AWS 비용을 요약해주세요." 입력후에 결과를 확인합니다.
+아래와 같이 swarm_agent를 invoke하여 결과를 얻습니다.
 
-<img src="https://github.com/user-attachments/assets/5794def3-47fd-498f-8074-0d970bee1c99" width="650">
+```python
+inputs = [HumanMessage(content=query)]
+config = {
+    "recursion_limit": 50
+}
 
-
-### 이미지 생성
-
-왼쪽 메뉴에서 Agent를 선택하고, MCP config로 "image generation"을 선택한 후에 "노을이 지는 아름다운 강변을 달리기하는 사람을 그려주세요."라고 입력 후에 결과를 확인합니다.
-
-<img src="https://github.com/user-attachments/assets/a4147b0f-86d2-4042-83bb-9c9b61e51a2f" width="650">
-
-### AWS Architecture 그리기
-
-메뉴에서 "Agent(Chat)"를 선택하고 MCP로 "aws diagram"를 고른 후, "Amazon S3로 web hosting을 하기 위한 architecture를 추천해주세요."와 "Cognito를 이용해 인증할수 있도록 해주세요."으로 순차적으로 명령을 하면 아래와 같은 결과를 얻을 수 있습니다.
-
-![noname](https://github.com/user-attachments/assets/04191a61-746f-4852-ad2a-e77b6af7cedc)
-
-### Code Interpreter의 활용
-
-"strawberry의 r의 갯수는?"로 질문하면 아래와 같이 Tools 리스트에서 "repl_coder"가 선택되어 활용됩니다.
-
-<img src="https://github.com/user-attachments/assets/2575d4b1-8871-4677-a982-82d60ec6036a" width="650">
-
-### Storage
-
-Tool에서 "aws storage"를 선택하고, "내 s3 전체 사용량은?"이라고 질문합니다. 이때의 결과는 아래와 같습니다. 
-
-<img src="https://github.com/user-attachments/assets/a9e41d68-6a2a-4cda-a264-58cc3124f51d" width="650">
-
-"내 aws strorage 사용량은?"이라고 질문하면, S3, EFS, EBS의 용량을 확인하여 아래와 같이 답변할 수 있습니다.
-
-<img src="https://github.com/user-attachments/assets/4c390cee-fd91-487e-ba0d-8b99fd7389ae" width="650">
-
-## Reference 
-
-[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk)
-
-[Using MCP with LangGraph agents](https://www.youtube.com/watch?v=OX89LkTvNKQ)
-
-[MCP From Scratch](https://mirror-feeling-d80.notion.site/MCP-From-Scratch-1b9808527b178040b5baf83a991ed3b2)
-
-[Understanding MCP From Scratch](https://www.youtube.com/watch?v=CDjjaTALI68)
-
-[LangChain MCP Adapters](https://github.com/langchain-ai/langchain-mcp-adapters)
+result = langgraph_app.invoke({"messages": inputs}, config)
+```
 
 
-["Vibe Coding" LangGraph apps with llms.txt and MCP](https://www.youtube.com/watch?v=fk2WEVZfheI)
+### 실행 결과
 
-[MCP LLMS-TXT Documentation Server](https://github.com/langchain-ai/mcpdoc)
+"서울 날씨는?"이라고 질문하면 search agent에서 weather agent로 이동 후에 날씨 정보를 조회합니다.
+
+<img src="https://github.com/user-attachments/assets/c7e1e998-aeb1-4bac-b98f-6de05bcc41b2" width="700">
 
 
+"서울에서 부산을 거쳐서 제주로 가려고합니다. 가는 동안의 현재 온도와 지역 맛집 검색해서 추천해주세요."로 입력후 결과를 확인합니다.
 
-[MCP - For Server Developers](https://modelcontextprotocol.io/quickstart/server)
+이때의 결과를 보면 아래와 같이, 시작이 search agent이므로 weather agent로 transfer하고 날씨 정보를 수집합니다.
 
-[Model Context Protocol (MCP) and Amazon Bedrock](https://community.aws/content/2uFvyCPQt7KcMxD9ldsJyjZM1Wp/model-context-protocol-mcp-and-amazon-bedrock)
+<img src="https://github.com/user-attachments/assets/a01d7922-cd73-4879-ba79-2da1f8d14f70" width="700">
 
-[Model Context Protocol servers](https://github.com/modelcontextprotocol/servers)
 
-[Langchain.js MCP Adapter](https://www.linkedin.com/posts/langchain_mcp-adapters-released-introducing-our-activity-7308925375160467457-_BPL/?utm_source=share&utm_medium=member_android&rcm=ACoAAA5jTp0BX-JuOkof3Ak56U3VlXjQVT43NzQ)
+날씨 정보를 모두 수집하면 다시 search agent로 전환한 후에 검색을 수행합니다.
 
-[Using LangChain With Model Context Protocol (MCP)](https://cobusgreyling.medium.com/using-langchain-with-model-context-protocol-mcp-e89b87ee3c4c)
+<img src="https://github.com/user-attachments/assets/7de5a1a7-5201-4b9a-b7aa-b1e248615338" width="700">
 
-  
-[Desktop Commander MCP](https://github.com/wonderwhy-er/DesktopCommanderMCP)
 
-[Smithery](https://smithery.ai/)
+최종적으로 아래와 같이 서울, 부산, 제주의 온도와 맛집에 대한 정보를 아래처럼 수집하였습니다.
 
-[Cursor AI 말고, 나만의 #MCP 에이전트 앱 만들어 보기!](https://www.youtube.com/watch?v=ISrYHGg2C2c)
+<img src="https://github.com/user-attachments/assets/5295485c-6077-4e88-9065-69e3b6b1f185" width="700">
 
-[The Top 7 MCP-Supported AI Frameworks](https://medium.com/@amosgyamfi/the-top-7-mcp-supported-ai-frameworks-a8e5030c87ab)

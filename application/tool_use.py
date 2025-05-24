@@ -4,7 +4,6 @@ import boto3
 import re
 import requests
 import datetime
-import knowledge_base as kb
 import chat
 import utils
 import search
@@ -49,17 +48,8 @@ print(f"environment: {environment}")
 bedrock_region = config["region"] if "region" in config else "us-west-2"
 projectName = config["projectName"] if "projectName" in config else "langgraph-nova"
 
-path = config["sharing_url"] if "sharing_url" in config else None
-if path is None:
-    raise Exception ("No Sharing URL")
-
 numberOfDocs = 4
-s3_prefix = 'docs'
-s3_image_prefix = 'images'
 
-doc_prefix = s3_prefix+'/'
-
-reference_docs = []
 contentList = []
 # api key to get weather information in agent
 secretsmanager = boto3.client(
@@ -209,57 +199,7 @@ def get_weather_info(city: str) -> str:
         
     logger.info(f"weather_str: {weather_str}")                        
     return weather_str
-
-# # Tavily Tool
-# tavily_tool = TavilySearchResults(
-#     max_results=3,
-#     include_answer=True,
-#     include_raw_content=True,
-#     api_wrapper=tavily_api_wrapper,
-#     search_depth="advanced", # "basic"
-#     # include_domains=["google.com", "naver.com"]
-# )
-     
-@tool    
-def search_by_knowledge_base(keyword: str) -> str:
-    """
-    Search technical information by keyword and then return the result as a string.
-    keyword: search keyword
-    return: the technical information of keyword
-    """    
-    logger.info(f"###### search_by_knowledge_base ######") 
-    
-    global reference_docs
- 
-    logger.info(f"keyword: {keyword}")
-    keyword = keyword.replace('\'','')
-    keyword = keyword.replace('|','')
-    keyword = keyword.replace('\n','')
-    logger.info(f"modified keyword: {keyword}")
-    
-    relevant_docs = kb.retrieve_documents_from_knowledge_base(keyword, top_k=numberOfDocs)
-
-    # grading        
-    filtered_docs = chat.grade_documents(keyword, relevant_docs)
-
-    filtered_docs = chat.check_duplication(filtered_docs) # duplication checker
-
-    relevant_context = ""
-    for i, document in enumerate(filtered_docs):
-        logger.info(f"{i}: {document}")
-        if document.page_content:
-            relevant_context += document.page_content + "\n\n"        
-    logger.info(f"relevant_context: {relevant_context}")
-    
-    if len(filtered_docs):
-        reference_docs += filtered_docs
-        return relevant_context
-    else:        
-        # relevant_context = "No relevant documents found."
-        relevant_context = "관련된 정보를 찾지 못하였습니다."
-        logger.info(f"--> {relevant_context}")
-        return relevant_context
-    
+         
 @tool
 def search_by_tavily(keyword: str) -> str:
     """
@@ -274,17 +214,14 @@ def search_by_tavily(keyword: str) -> str:
     relevant_documents = search.retrieve_documents_from_tavily(keyword, top_k=3)
     # logger.info(f"--> {len(relevant_documents)} docs from tavily")
 
-    # grade  
-    filtered_docs = chat.grade_documents(keyword, relevant_documents)
-
     answer = ""
-    for doc in filtered_docs:
+    for doc in relevant_documents:
         content = doc.page_content
         url = doc.metadata['url']
         answer += f"{content}, URL: {url}\n" 
 
-    if len(filtered_docs):
-        reference_docs += filtered_docs
+    if len(relevant_documents):
+        reference_docs += relevant_documents
     
     if answer == "":
         # answer = "No relevant documents found." 

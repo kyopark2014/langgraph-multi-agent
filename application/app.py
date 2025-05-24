@@ -1,13 +1,8 @@
 import streamlit as st 
 import chat
-import json
-import knowledge_base as kb
-import cost_analysis as cost
 import supervisor
 import router
 import swarm
-import traceback
-import mcp_config 
 import logging
 import sys
 
@@ -60,7 +55,7 @@ with st.sidebar:
     # model selection box
     modelName = st.selectbox(
         '🖊️ 사용 모델을 선택하세요',
-        ("Nova Premier", 'Nova Pro', 'Nova Lite', 'Nova Micro', 'Claude 4 Opus', 'Claude 4 Sonnet', 'Claude 3.7 Sonnet', 'Claude 3.5 Sonnet', 'Claude 3.0 Sonnet', 'Claude 3.5 Haiku'), index=5
+        ("Nova Premier", 'Nova Pro', 'Nova Lite', 'Nova Micro', 'Claude 4 Opus', 'Claude 4 Sonnet', 'Claude 3.7 Sonnet', 'Claude 3.5 Sonnet', 'Claude 3.0 Sonnet', 'Claude 3.5 Haiku'), index=6
     )
 
     # debug checkbox
@@ -68,7 +63,7 @@ with st.sidebar:
     debugMode = 'Enable' if select_debugMode else 'Disable'
     #print('debugMode: ', debugMode)
 
-    chat.update(modelName, debugMode, multiRegion, mcp)
+    chat.update(modelName, debugMode)
 
     st.success(f"Connected to {modelName}", icon="💚")
     clear_button = st.button("대화 초기화", key="clear")
@@ -78,8 +73,6 @@ st.title('🔮 '+ mode)
 
 if clear_button==True:
     chat.initiate()
-    cost.cost_data = {}
-    cost.visualizations = {}
 
 # Initialize chat history
 if "messages" not in st.session_state:
@@ -126,86 +119,7 @@ if clear_button or "messages" not in st.session_state:
     st.session_state.greetings = False
     chat.clear_chat_history()
     st.rerun()    
-
-# Preview the uploaded image in the sidebar
-file_name = ""
-state_of_code_interpreter = False
-if uploaded_file is not None and clear_button==False:
-    logger.info(f"uploaded_file.name: {uploaded_file.name}")
-    if uploaded_file.name:
-        logger.info(f"csv type? {uploaded_file.name.lower().endswith(('.csv'))}")
-
-    if uploaded_file.name and not mode == '이미지 분석':
-        chat.initiate()
-
-        if debugMode=='Enable':
-            status = '선택한 파일을 업로드합니다.'
-            logger.info(f"status: {status}")
-            st.info(status)
-
-        file_name = uploaded_file.name
-        logger.info(f"uploading... file_name: {file_name}")
-        file_url = chat.upload_to_s3(uploaded_file.getvalue(), file_name)
-        logger.info(f"file_url: {file_url}")
-
-        kb.sync_data_source()  # sync uploaded files
-            
-        status = f'선택한 "{file_name}"의 내용을 요약합니다.'
-        # my_bar = st.sidebar.progress(0, text=status)
-        
-        # for percent_complete in range(100):
-        #     time.sleep(0.2)
-        #     my_bar.progress(percent_complete + 1, text=status)
-        if debugMode=='Enable':
-            logger.info(f"status: {status}")
-            st.info(status)
     
-        msg = chat.get_summary_of_uploaded_file(file_name, st)
-        st.session_state.messages.append({"role": "assistant", "content": f"선택한 문서({file_name})를 요약하면 아래와 같습니다.\n\n{msg}"})    
-        logger.info(f"msg: {msg}")
-
-        st.write(msg)
-
-    if uploaded_file and clear_button==False and mode == '이미지 분석':
-        st.image(uploaded_file, caption="이미지 미리보기", use_container_width=True)
-
-        file_name = uploaded_file.name
-        url = chat.upload_to_s3(uploaded_file.getvalue(), file_name)
-        logger.info(f"url: {url}")
-
-if seed_image_url and clear_button==False and enable_seed==True:
-    st.image(seed_image_url, caption="이미지 미리보기", use_container_width=True)
-    logger.info(f"preview: {seed_image_url}")
-    
-if clear_button==False and mode == '비용 분석':
-    st.subheader("📈 Cost Analysis")
-
-    if not cost.visualizations:
-        cost.get_visualiation()
-
-    if 'service_pie' in cost.visualizations:
-        st.plotly_chart(cost.visualizations['service_pie'])
-    if 'daily_trend' in cost.visualizations:
-        st.plotly_chart(cost.visualizations['daily_trend'])
-    if 'region_bar' in cost.visualizations:
-        st.plotly_chart(cost.visualizations['region_bar'])
-
-    with st.status("thinking...", expanded=True, state="running") as status:
-        if not cost.cost_data:
-            st.info("비용 데이터를 가져옵니다.")
-            cost_data = cost.get_cost_analysis()
-            logger.info(f"cost_data: {cost_data}")
-            cost.cost_data = cost_data
-        else:
-            if not cost.insights:        
-                st.info("잠시만 기다리세요. 지난 한달간의 사용량을 분석하고 있습니다...")
-                insights = cost.generate_cost_insights()
-                logger.info(f"insights: {insights}")
-                cost.insights = insights
-            
-            st.markdown(cost.insights)
-            st.session_state.messages.append({"role": "assistant", "content": cost.insights})
-
 # Always show the chat input
 if prompt := st.chat_input("메시지를 입력하세요."):
     with st.chat_message("user"):  # display user message in chat message container
@@ -222,30 +136,6 @@ if prompt := st.chat_input("메시지를 입력하세요."):
             st.session_state.messages.append({"role": "assistant", "content": response})
 
             chat.save_chat_history(prompt, response)
-
-        elif mode == 'RAG':
-            with st.status("running...", expanded=True, state="running") as status:
-                response, reference_docs = chat.run_rag_with_knowledge_base(prompt, st)                           
-                st.write(response)
-                logger.info(f"response: {response}")
-
-                st.session_state.messages.append({"role": "assistant", "content": response})
-
-                chat.save_chat_history(prompt, response)
-            
-            show_references(reference_docs) 
-        
-        elif mode == 'Agent':
-            sessionState = ""
-            chat.references = []
-            chat.image_url = []
-            response = chat.run_agent(prompt, "Disable", st)
-
-        elif mode == 'Agent (Chat)':
-            sessionState = ""
-            chat.references = []
-            chat.image_url = []
-            response = chat.run_agent(prompt, "Enable", st)
 
         elif mode == "Multi-agent Supervisor (Router)":
             sessionState = ""
@@ -299,50 +189,4 @@ if prompt := st.chat_input("메시지를 입력하세요."):
 
                 show_references(reference_docs)              
 
-        elif mode == '번역하기':
-            response = chat.translate_text(prompt)
-            st.write(response)
-
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            chat.save_chat_history(prompt, response)
-
-        elif mode == '문법 검토하기':
-            response = chat.check_grammer(prompt)
-            st.write(response)
-
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            chat.save_chat_history(prompt, response)
         
-        elif mode == '이미지 분석':
-            if uploaded_file is None or uploaded_file == "":
-                st.error("파일을 먼저 업로드하세요.")
-                st.stop()
-
-            else:
-                if modelName == "Claude 3.5 Haiku":
-                    st.error("Claude 3.5 Haiku은 이미지를 지원하지 않습니다. 다른 모델을 선택해주세요.")
-                else:
-                    with st.status("thinking...", expanded=True, state="running") as status:
-                        summary = chat.get_image_summarization(file_name, prompt, st)
-                        st.write(summary)
-
-                        st.session_state.messages.append({"role": "assistant", "content": summary})
-
-        elif mode == '비용 분석':
-            with st.status("thinking...", expanded=True, state="running") as status:
-                response = cost.ask_cost_insights(prompt)
-                st.write(response)
-
-                st.session_state.messages.append({"role": "assistant", "content": response})
-
-        else:
-            stream = chat.general_conversation(prompt)
-
-            response = st.write_stream(stream)
-            logger.info(f"response: {response}")
-
-            st.session_state.messages.append({"role": "assistant", "content": response})
-            chat.save_chat_history(prompt, response)
-        
-
-

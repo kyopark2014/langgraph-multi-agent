@@ -196,7 +196,7 @@ def run_langgraph_swarm(query, st):
 
         # create search agent
         search_agent = create_collaborator(
-            [tool_use.search_by_tavily, tool_use.search_by_knowledge_base, transfer_to_weather_agent], 
+            [tool_use.search_by_tavily, transfer_to_weather_agent], 
             "search_agent", st
         )
 
